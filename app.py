@@ -5,13 +5,10 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import io
 import os
-from pathlib import Path
+from elevenlabs import VoiceSettings
+from elevenlabs.client import ElevenLabs
+import anthropic
 import json
-
-import openai
-from anthropic import Anthropic
-from elevenlabs import ElevenLabs, VoiceSettings
-import requests
 
 # Initialize session state
 if 'running' not in st.session_state:
@@ -24,18 +21,12 @@ if 'laps' not in st.session_state:
     st.session_state.laps = []
 if 'current_lap_start' not in st.session_state:
     st.session_state.current_lap_start = 0
-if 'audio_data' not in st.session_state:
-    st.session_state.audio_data = None
-if 'transcription' not in st.session_state:
-    st.session_state.transcription = ""
-if 'script' not in st.session_state:
-    st.session_state.script = ""
-if 'generated_audio' not in st.session_state:
-    st.session_state.generated_audio = None
-if 'music_request' not in st.session_state:
-    st.session_state.music_request = ""
-if 'sfx_requests' not in st.session_state:
-    st.session_state.sfx_requests = []
+if 'scripts' not in st.session_state:
+    st.session_state.scripts = {}
+if 'audio_files' not in st.session_state:
+    st.session_state.audio_files = {}
+if 'sound_effects' not in st.session_state:
+    st.session_state.sound_effects = {}
 
 def format_time(seconds):
     """Format seconds to HH:MM:SS.mmm"""
@@ -49,115 +40,82 @@ def timecode_to_frames(seconds, fps=30):
     """Convert seconds to frame count"""
     return int(seconds * fps)
 
-def transcribe_audio(audio_bytes, api_key):
-    """Transcribe audio using OpenAI Whisper"""
+def generate_script_with_claude(section_info, api_key):
+    """Generate audio tour script using Claude API"""
     try:
-        client = openai.OpenAI(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key)
         
-        # Save audio to temporary file
-        with open("temp_audio.wav", "wb") as f:
-            f.write(audio_bytes)
-        
-        # Transcribe
-        with open("temp_audio.wav", "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="text"
-            )
-        
-        # Clean up
-        os.remove("temp_audio.wav")
-        
-        return transcript
-    except Exception as e:
-        st.error(f"Transcription error: {str(e)}")
-        return None
+        prompt = f"""Create an engaging audio tour script for the following section:
 
-def generate_audio_tour_script(transcription, laps, api_key, model_choice="claude"):
-    """Generate audio tour script using LLM"""
-    try:
-        # Prepare context about the tour sections
-        sections_info = "\n".join([
-            f"Section {i+1} ({lap['title']}): Duration {format_time(lap['duration'])}"
-            for i, lap in enumerate(laps)
-        ])
-        
-        prompt = f"""Based on the following brainstorming notes and tour structure, create a professional audio tour script.
+Section Title: {section_info['title']}
+Duration: {section_info.get('duration', 'Not specified')} seconds
+Additional Instructions: {section_info.get('instructions', 'Create an informative and engaging narration')}
 
-BRAINSTORMING NOTES:
-{transcription}
+Please create a natural-sounding script that:
+1. Is appropriate for the given duration
+2. Is engaging and informative
+3. Uses conversational language suitable for audio narration
+4. Includes natural pauses where appropriate (indicate with [pause])
+5. Suggests sound effects where relevant (indicate with [SFX: description])
 
-TOUR STRUCTURE:
-{sections_info}
-
-Please create:
-1. A complete audio tour script with narration for each section
-2. Suggestions for background music mood/style
-3. Suggestions for sound effects for each section
-
-Format the output as JSON with this structure:
+Format the response as JSON with the following structure:
 {{
-    "sections": [
-        {{
-            "section_number": 1,
-            "title": "Section Title",
-            "script": "Narration text...",
-            "duration": "00:00:00.000",
-            "music_mood": "calm, ambient",
-            "sound_effects": ["footsteps", "door opening"]
-        }}
-    ],
-    "overall_music_description": "Description for background music generation",
-    "production_notes": "Additional notes"
-}}
-"""
+    "script": "The main narration text",
+    "sound_effects": ["list of suggested sound effects with timestamps"],
+    "estimated_word_count": number,
+    "notes": "Any additional production notes"
+}}"""
 
-        if model_choice == "claude":
-            client = Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            response_text = message.content[0].text
-        else:  # OpenAI
-            client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[
-                    {"role": "system", "content": "You are a professional audio tour script writer."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-            response_text = response.choices[0].message.content
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
         
-        # Parse JSON response
-        script_data = json.loads(response_text)
-        return script_data
-    
+        # Parse the response
+        response_text = message.content[0].text
+        
+        # Try to extract JSON from the response
+        try:
+            # Remove markdown code blocks if present
+            if '```json' in response_text:
+                response_text = response_text.split('```json')[1].split('```')[0].strip()
+            elif '```' in response_text:
+                response_text = response_text.split('```')[1].split('```')[0].strip()
+            
+            result = json.loads(response_text)
+        except:
+            # If JSON parsing fails, create a simple structure
+            result = {
+                "script": response_text,
+                "sound_effects": [],
+                "estimated_word_count": len(response_text.split()),
+                "notes": "Script generated successfully"
+            }
+        
+        return result
     except Exception as e:
-        st.error(f"Script generation error: {str(e)}")
+        st.error(f"Error generating script: {str(e)}")
         return None
 
-def generate_voice_audio(text, api_key, voice_id, model_id="eleven_turbo_v2_5"):
+def generate_audio_with_elevenlabs(text, voice_id, api_key):
     """Generate audio using ElevenLabs API"""
     try:
         client = ElevenLabs(api_key=api_key)
         
         audio = client.text_to_speech.convert(
             voice_id=voice_id,
-            model_id=model_id,
+            output_format="mp3_44100_128",
             text=text,
+            model_id="eleven_multilingual_v2",
             voice_settings=VoiceSettings(
                 stability=0.5,
                 similarity_boost=0.75,
                 style=0.0,
-                use_speaker_boost=True
-            )
+                use_speaker_boost=True,
+            ),
         )
         
         # Convert generator to bytes
@@ -166,74 +124,36 @@ def generate_voice_audio(text, api_key, voice_id, model_id="eleven_turbo_v2_5"):
             audio_bytes += chunk
         
         return audio_bytes
-    
     except Exception as e:
-        st.error(f"Voice generation error: {str(e)}")
+        st.error(f"Error generating audio: {str(e)}")
         return None
 
-def generate_sound_effect(description, api_key):
-    """Generate sound effect using ElevenLabs API"""
+def get_elevenlabs_voices(api_key):
+    """Fetch available voices from ElevenLabs"""
     try:
-        url = "https://api.elevenlabs.io/v1/sound-generation"
-        
-        headers = {
-            "xi-api-key": api_key,
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "text": description,
-            "duration_seconds": 5.0,
-            "prompt_influence": 0.3
-        }
-        
-        response = requests.post(url, json=data, headers=headers)
-        
-        if response.status_code == 200:
-            return response.content
-        else:
-            st.warning(f"Sound effect generation failed: {response.text}")
-            return None
-    
+        client = ElevenLabs(api_key=api_key)
+        voices = client.voices.get_all()
+        return {voice.name: voice.voice_id for voice in voices.voices}
     except Exception as e:
-        st.error(f"Sound effect generation error: {str(e)}")
-        return None
-
-def create_suno_music_request(description):
-    """Create a formatted request for Suno AI music generation"""
-    request = f"""
-SUNO AI MUSIC GENERATION REQUEST
-
-Description: {description}
-
-Instructions for Suno AI:
-1. Visit: https://suno.ai
-2. Use the following prompt to generate background music:
-
-PROMPT:
-{description}
-
-Suggested Settings:
-- Style: Instrumental, Ambient
-- Duration: Extended (if available)
-- Mood: Match the tour atmosphere
-
-Please generate and download the music file, then add it to your audio tour project.
-"""
-    return request
+        st.error(f"Error fetching voices: {str(e)}")
+        return {}
 
 def generate_resolve_xml(laps, fps=30):
     """Generate DaVinci Resolve compatible XML with markers"""
+    # Create XML structure
     xmeml = ET.Element('xmeml', version='4')
     
+    # Create sequence
     sequence = ET.SubElement(xmeml, 'sequence')
     ET.SubElement(sequence, 'name').text = 'Audio Tour Timeline'
     ET.SubElement(sequence, 'duration').text = str(timecode_to_frames(laps[-1]['end_time'], fps) if laps else 0)
     
+    # Rate settings
     rate = ET.SubElement(sequence, 'rate')
     ET.SubElement(rate, 'timebase').text = str(fps)
     ET.SubElement(rate, 'ntsc').text = 'FALSE'
     
+    # Timecode
     timecode = ET.SubElement(sequence, 'timecode')
     ET.SubElement(timecode, 'rate')
     rate_tc = timecode.find('rate')
@@ -242,136 +162,115 @@ def generate_resolve_xml(laps, fps=30):
     ET.SubElement(timecode, 'string').text = '00:00:00:00'
     ET.SubElement(timecode, 'frame').text = '0'
     
+    # Media
     media = ET.SubElement(sequence, 'media')
+    
+    # Video track
     video = ET.SubElement(media, 'video')
     track = ET.SubElement(video, 'track')
     
+    # Add markers for each lap
     for i, lap in enumerate(laps):
+        # Create a clip item for each section
         clipitem = ET.SubElement(track, 'clipitem', id=f"clipitem-{i+1}")
         ET.SubElement(clipitem, 'name').text = lap['title']
         ET.SubElement(clipitem, 'duration').text = str(timecode_to_frames(lap['duration'], fps))
         
+        # Rate
         clip_rate = ET.SubElement(clipitem, 'rate')
         ET.SubElement(clip_rate, 'timebase').text = str(fps)
         ET.SubElement(clip_rate, 'ntsc').text = 'FALSE'
         
+        # In/Out points
         ET.SubElement(clipitem, 'in').text = '0'
         ET.SubElement(clipitem, 'out').text = str(timecode_to_frames(lap['duration'], fps))
         ET.SubElement(clipitem, 'start').text = str(timecode_to_frames(lap['start_time'], fps))
         ET.SubElement(clipitem, 'end').text = str(timecode_to_frames(lap['end_time'], fps))
         
+        # Add marker
         marker = ET.SubElement(clipitem, 'marker')
         ET.SubElement(marker, 'name').text = lap['title']
         ET.SubElement(marker, 'comment').text = f"Duration: {format_time(lap['duration'])}"
         ET.SubElement(marker, 'in').text = str(timecode_to_frames(lap['start_time'], fps))
         ET.SubElement(marker, 'out').text = str(timecode_to_frames(lap['end_time'], fps))
     
+    # Pretty print XML
     xml_string = ET.tostring(xmeml, encoding='unicode')
     dom = minidom.parseString(xml_string)
     return dom.toprettyxml(indent='  ')
 
 # Page config
 st.set_page_config(
-    page_title="AI Audio Tour Creator",
+    page_title="Audio Tour Production Studio",
     page_icon="🎙️",
     layout="wide"
 )
 
-# Sidebar for API Configuration
+# Sidebar for API keys
 with st.sidebar:
     st.header("🔑 API Configuration")
     
-    openai_key = st.text_input("OpenAI API Key", type="password", help="For Whisper transcription")
-    anthropic_key = st.text_input("Anthropic API Key", type="password", help="For Claude script generation")
-    elevenlabs_key = st.text_input("ElevenLabs API Key", type="password", help="For voice & SFX generation")
+    claude_api_key = st.text_input(
+        "Anthropic API Key",
+        type="password",
+        help="Get your API key from console.anthropic.com"
+    )
     
-    st.divider()
-    
-    st.header("🎤 Voice Settings")
-    voice_id = st.text_input(
-        "ElevenLabs Voice ID",
-        value="21m00Tcm4TlvDq8ikWAM",
-        help="Default: Rachel voice"
+    elevenlabs_api_key = st.text_input(
+        "ElevenLabs API Key",
+        type="password",
+        help="Get your API key from elevenlabs.io"
     )
     
     st.divider()
     
-    st.header("🤖 LLM Selection")
-    llm_choice = st.selectbox(
-        "Script Generator",
-        ["claude", "openai"],
-        help="Choose which LLM to use for script generation"
+    st.header("⚙️ Settings")
+    production_mode = st.radio(
+        "Mode",
+        ["Timer Only", "Full Production"],
+        help="Timer Only: Just track timestamps\nFull Production: Generate scripts and audio"
     )
+    
+    if production_mode == "Full Production" and elevenlabs_api_key:
+        st.subheader("🎤 Voice Settings")
+        voices = get_elevenlabs_voices(elevenlabs_api_key)
+        if voices:
+            selected_voice = st.selectbox(
+                "Select Voice",
+                options=list(voices.keys())
+            )
+            st.session_state.selected_voice_id = voices.get(selected_voice, "")
+        else:
+            st.warning("Enter valid API key to load voices")
 
-# Main App
-st.title("🎙️ AI Audio Tour Creator")
+# Title and description
+st.title("🎙️ Audio Tour Production Studio")
 st.markdown("""
-Complete audio tour creation workflow: Record → Transcribe → Generate Script → Synthesize Voice → Create Music & SFX
+Complete audio tour production toolkit: Create timestamps, generate AI scripts, 
+convert to speech with ElevenLabs, and export to DaVinci Resolve.
 """)
 
-# Tab Navigation
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "1️⃣ Record & Transcribe",
-    "2️⃣ Timer & Sections",
-    "3️⃣ Generate Script",
-    "4️⃣ Create Audio",
-    "5️⃣ Export & Download"
-])
+# Create tabs for different sections
+tab1, tab2, tab3, tab4 = st.tabs(["⏱️ Timer & Timeline", "📝 Script Generation", "🎤 Audio Production", "📤 Export"])
 
-# TAB 1: Recording and Transcription
 with tab1:
-    st.header("🎤 Upload Audio for Brainstorming")
-    
-    st.info("Upload an audio file of yourself describing the audio tour content, locations, and key points.")
-    
-    uploaded_file = st.file_uploader(
-        "Upload audio file (WAV, MP3, M4A)",
-        type=['wav', 'mp3', 'm4a', 'ogg'],
-        help="Upload a pre-recorded audio file for transcription"
-    )
-    
-    if uploaded_file is not None:
-        st.audio(uploaded_file)
-        audio_bytes = uploaded_file.getvalue()
-        st.session_state.audio_data = audio_bytes
-        
-        if st.button("📝 Transcribe Audio", type="primary"):
-            if not openai_key:
-                st.error("Please enter your OpenAI API Key in the sidebar")
-            else:
-                with st.spinner("Transcribing audio..."):
-                    transcription = transcribe_audio(audio_bytes, openai_key)
-                    if transcription:
-                        st.session_state.transcription = transcription
-                        st.success("Transcription complete!")
-                        st.rerun()
-    
-    if st.session_state.transcription:
-        st.subheader("📄 Transcription")
-        transcription_text = st.text_area(
-            "Edit transcription if needed:",
-            value=st.session_state.transcription,
-            height=300
-        )
-        st.session_state.transcription = transcription_text
-
-# TAB 2: Timer and Sections
-with tab2:
-    st.header("⏱️ Time Your Tour Sections")
-    
+    # Create two columns
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("Timer Control")
+        st.subheader("⏱️ Timer Control")
         
+        # Calculate current time
         if st.session_state.running and st.session_state.start_time:
             current_elapsed = st.session_state.elapsed_time + (time.time() - st.session_state.start_time)
         else:
             current_elapsed = st.session_state.elapsed_time
         
+        # Display timer
         timer_display = st.empty()
         timer_display.markdown(f"## `{format_time(current_elapsed)}`")
         
+        # Control buttons
         button_col1, button_col2, button_col3 = st.columns(3)
         
         with button_col1:
@@ -389,8 +288,10 @@ with tab2:
         
         with button_col2:
             if st.button("⏹️ Stop Lap", use_container_width=True, disabled=not st.session_state.running and st.session_state.elapsed_time == 0):
+                # Store the current time as lap end
                 lap_end_time = current_elapsed
                 
+                # Create lap entry (title will be added below)
                 st.session_state.laps.append({
                     'start_time': st.session_state.current_lap_start,
                     'end_time': lap_end_time,
@@ -398,6 +299,7 @@ with tab2:
                     'title': f"Section {len(st.session_state.laps) + 1}"
                 })
                 
+                # Update current lap start for next lap
                 st.session_state.current_lap_start = lap_end_time
                 st.rerun()
         
@@ -416,8 +318,10 @@ with tab2:
         if st.session_state.laps:
             st.info(f"**Total Sections:** {len(st.session_state.laps)}")
             
+            # Display and edit laps
             for i, lap in enumerate(st.session_state.laps):
                 with st.expander(f"Section {i+1}: {lap['title']}", expanded=False):
+                    # Edit title
                     new_title = st.text_input(
                         "Section Title",
                         value=lap['title'],
@@ -425,194 +329,183 @@ with tab2:
                     )
                     st.session_state.laps[i]['title'] = new_title
                     
+                    # Display times
                     st.write(f"**Start:** `{format_time(lap['start_time'])}`")
                     st.write(f"**End:** `{format_time(lap['end_time'])}`")
                     st.write(f"**Duration:** `{format_time(lap['duration'])}`")
                     
+                    # Delete button
                     if st.button(f"🗑️ Delete Section {i+1}", key=f"delete_{i}"):
                         st.session_state.laps.pop(i)
                         st.rerun()
         else:
             st.info("No sections recorded yet. Start the timer and create your first lap!")
 
-# TAB 3: Script Generation
-with tab3:
-    st.header("✍️ Generate Audio Tour Script")
+with tab2:
+    st.subheader("🤖 AI Script Generation")
     
-    if not st.session_state.transcription:
-        st.warning("Please record and transcribe your brainstorming notes first (Tab 1)")
+    if not claude_api_key:
+        st.warning("⚠️ Please enter your Anthropic API key in the sidebar to use script generation.")
     elif not st.session_state.laps:
-        st.warning("Please create tour sections with the timer (Tab 2)")
+        st.info("📋 Create some timeline sections first in the Timer & Timeline tab.")
     else:
-        st.success(f"Ready to generate! You have transcription and {len(st.session_state.laps)} sections.")
+        st.markdown("Generate engaging audio tour scripts for each section using Claude AI.")
         
-        if st.button("🤖 Generate Script with AI", type="primary"):
-            required_key = anthropic_key if llm_choice == "claude" else openai_key
-            if not required_key:
-                st.error(f"Please enter your {llm_choice.upper()} API Key in the sidebar")
-            else:
-                with st.spinner("Generating audio tour script..."):
-                    script_data = generate_audio_tour_script(
-                        st.session_state.transcription,
-                        st.session_state.laps,
-                        required_key,
-                        llm_choice
-                    )
-                    
-                    if script_data:
-                        st.session_state.script = script_data
-                        st.success("Script generated successfully!")
-                        st.rerun()
+        # Select section to generate script for
+        section_options = [f"Section {i+1}: {lap['title']}" for i, lap in enumerate(st.session_state.laps)]
+        selected_section_idx = st.selectbox(
+            "Select Section",
+            range(len(section_options)),
+            format_func=lambda x: section_options[x]
+        )
         
-        if st.session_state.script:
-            st.subheader("📜 Generated Script")
-            
-            script_data = st.session_state.script
-            
-            # Overall music description
-            if 'overall_music_description' in script_data:
-                st.info(f"**Background Music:** {script_data['overall_music_description']}")
-            
-            # Display each section
-            for section in script_data.get('sections', []):
-                with st.expander(f"Section {section['section_number']}: {section['title']}", expanded=True):
-                    st.markdown(f"**Script:**\n\n{section['script']}")
-                    st.write(f"**Duration:** {section.get('duration', 'N/A')}")
-                    st.write(f"**Music Mood:** {section.get('music_mood', 'N/A')}")
-                    st.write(f"**Sound Effects:** {', '.join(section.get('sound_effects', []))}")
-            
-            # Production notes
-            if 'production_notes' in script_data:
-                st.info(f"**Production Notes:** {script_data['production_notes']}")
-
-# TAB 4: Audio Creation
-with tab4:
-    st.header("🔊 Generate Voice & Sound Effects")
-    
-    if not st.session_state.script:
-        st.warning("Please generate the script first (Tab 3)")
-    else:
-        script_data = st.session_state.script
+        selected_lap = st.session_state.laps[selected_section_idx]
         
-        # Voice Generation
-        st.subheader("🎙️ Voice Generation")
+        col1, col2 = st.columns([2, 1])
         
-        if st.button("🎵 Generate Complete Voice Narration", type="primary"):
-            if not elevenlabs_key:
-                st.error("Please enter your ElevenLabs API Key in the sidebar")
-            else:
-                with st.spinner("Generating voice narration for all sections..."):
-                    all_audio = []
-                    
-                    for section in script_data.get('sections', []):
-                        st.info(f"Generating Section {section['section_number']}...")
-                        audio_bytes = generate_voice_audio(
-                            section['script'],
-                            elevenlabs_key,
-                            voice_id
-                        )
-                        
-                        if audio_bytes:
-                            all_audio.append({
-                                'section': section['section_number'],
-                                'title': section['title'],
-                                'audio': audio_bytes
-                            })
-                    
-                    st.session_state.generated_audio = all_audio
-                    st.success(f"Generated narration for {len(all_audio)} sections!")
+        with col1:
+            script_instructions = st.text_area(
+                "Script Instructions",
+                placeholder="E.g., Describe the architectural features of the main hall, mention the artist's background, highlight the historical significance...",
+                height=150,
+                key=f"instructions_{selected_section_idx}"
+            )
+        
+        with col2:
+            st.metric("Duration", f"{selected_lap['duration']:.1f}s")
+            st.metric("Approx. Words", f"{int(selected_lap['duration'] * 2.5)}")
+            st.caption("Based on ~150 words/minute")
+        
+        if st.button("✨ Generate Script", type="primary", use_container_width=True):
+            with st.spinner("Generating script with Claude AI..."):
+                section_info = {
+                    'title': selected_lap['title'],
+                    'duration': selected_lap['duration'],
+                    'instructions': script_instructions
+                }
+                
+                result = generate_script_with_claude(section_info, claude_api_key)
+                
+                if result:
+                    st.session_state.scripts[selected_section_idx] = result
+                    st.success("✅ Script generated successfully!")
                     st.rerun()
         
-        # Display generated audio
-        if st.session_state.generated_audio:
-            st.subheader("🎧 Generated Audio Preview")
-            for audio_item in st.session_state.generated_audio:
-                st.write(f"**Section {audio_item['section']}: {audio_item['title']}**")
-                st.audio(audio_item['audio'], format="audio/mp3")
+        # Display generated script
+        if selected_section_idx in st.session_state.scripts:
+            st.divider()
+            script_data = st.session_state.scripts[selected_section_idx]
+            
+            st.subheader("Generated Script")
+            
+            # Editable script
+            edited_script = st.text_area(
+                "Script (editable)",
+                value=script_data['script'],
+                height=200,
+                key=f"script_edit_{selected_section_idx}"
+            )
+            st.session_state.scripts[selected_section_idx]['script'] = edited_script
+            
+            # Sound effects suggestions
+            if script_data.get('sound_effects'):
+                with st.expander("🔊 Suggested Sound Effects"):
+                    for sfx in script_data['sound_effects']:
+                        st.write(f"• {sfx}")
+            
+            # Notes
+            if script_data.get('notes'):
+                with st.expander("📌 Production Notes"):
+                    st.write(script_data['notes'])
+
+with tab3:
+    st.subheader("🎤 Audio Production")
+    
+    if not elevenlabs_api_key:
+        st.warning("⚠️ Please enter your ElevenLabs API key in the sidebar to generate audio.")
+    elif not st.session_state.scripts:
+        st.info("📝 Generate scripts first in the Script Generation tab.")
+    else:
+        st.markdown("Convert your scripts to professional voice narration using ElevenLabs.")
         
-        st.divider()
+        # Select section
+        script_sections = [f"Section {i+1}: {st.session_state.laps[i]['title']}" 
+                          for i in st.session_state.scripts.keys()]
         
-        # Sound Effects Generation
-        st.subheader("🔔 Sound Effects Generation")
-        
-        sfx_list = []
-        for section in script_data.get('sections', []):
-            for sfx in section.get('sound_effects', []):
-                if sfx not in sfx_list:
-                    sfx_list.append(sfx)
-        
-        if sfx_list:
-            st.write("**Detected Sound Effects:**")
-            selected_sfx = st.multiselect(
-                "Select sound effects to generate:",
-                sfx_list,
-                default=sfx_list[:3]  # Select first 3 by default
+        if script_sections:
+            selected_idx = st.selectbox(
+                "Select Section",
+                list(st.session_state.scripts.keys()),
+                format_func=lambda x: f"Section {x+1}: {st.session_state.laps[x]['title']}"
             )
             
-            if st.button("🎼 Generate Selected Sound Effects"):
-                if not elevenlabs_key:
-                    st.error("Please enter your ElevenLabs API Key in the sidebar")
-                else:
-                    with st.spinner("Generating sound effects..."):
-                        generated_sfx = []
-                        
-                        for sfx in selected_sfx:
-                            st.info(f"Generating: {sfx}...")
-                            sfx_audio = generate_sound_effect(sfx, elevenlabs_key)
+            script_text = st.session_state.scripts[selected_idx]['script']
+            
+            # Show script preview
+            with st.expander("📄 Script Preview", expanded=True):
+                st.write(script_text)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🎙️ Generate Audio", type="primary", use_container_width=True):
+                    if hasattr(st.session_state, 'selected_voice_id'):
+                        with st.spinner("Generating audio with ElevenLabs..."):
+                            audio_bytes = generate_audio_with_elevenlabs(
+                                script_text,
+                                st.session_state.selected_voice_id,
+                                elevenlabs_api_key
+                            )
                             
-                            if sfx_audio:
-                                generated_sfx.append({
-                                    'name': sfx,
-                                    'audio': sfx_audio
-                                })
-                        
-                        st.session_state.sfx_requests = generated_sfx
-                        st.success(f"Generated {len(generated_sfx)} sound effects!")
-                        st.rerun()
+                            if audio_bytes:
+                                st.session_state.audio_files[selected_idx] = audio_bytes
+                                st.success("✅ Audio generated successfully!")
+                                st.rerun()
+                    else:
+                        st.error("Please select a voice in the sidebar first.")
             
-            # Display generated SFX
-            if st.session_state.sfx_requests:
-                st.write("**Generated Sound Effects:**")
-                for sfx_item in st.session_state.sfx_requests:
-                    st.write(f"**{sfx_item['name']}**")
-                    st.audio(sfx_item['audio'], format="audio/mp3")
-        
-        st.divider()
-        
-        # Music Generation Request
-        st.subheader("🎵 Background Music")
-        
-        if 'overall_music_description' in script_data:
-            music_desc = script_data['overall_music_description']
-            
-            st.write("**Recommended Music Description:**")
-            st.info(music_desc)
-            
-            if st.button("📋 Create Suno AI Music Request"):
-                suno_request = create_suno_music_request(music_desc)
-                st.session_state.music_request = suno_request
-                st.success("Music generation request created!")
-                st.rerun()
+            # Display generated audio
+            if selected_idx in st.session_state.audio_files:
+                st.divider()
+                st.subheader("Generated Audio")
+                
+                audio_data = st.session_state.audio_files[selected_idx]
+                st.audio(audio_data, format='audio/mp3')
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        label="⬇️ Download Audio",
+                        data=audio_data,
+                        file_name=f"section_{selected_idx+1}_{st.session_state.laps[selected_idx]['title'].replace(' ', '_')}.mp3",
+                        mime="audio/mp3",
+                        use_container_width=True
+                    )
+        else:
+            st.info("No scripts available. Generate scripts in the Script Generation tab first.")
 
-# TAB 5: Export and Download
-with tab5:
-    st.header("📦 Export Your Audio Tour")
+with tab4:
+    st.subheader("📤 Export Options")
     
-    export_col1, export_col2 = st.columns(2)
-    
-    # XML Timeline Export
-    with export_col1:
-        st.subheader("🎬 DaVinci Resolve Timeline")
+    if st.session_state.laps:
+        export_col1, export_col2 = st.columns(2)
         
-        if st.session_state.laps:
+        with export_col1:
             fps = st.selectbox(
                 "Frame Rate (FPS)",
                 options=[24, 25, 30, 60],
-                index=2
+                index=2,
+                help="Select the frame rate for your DaVinci Resolve project"
             )
+        
+        with export_col2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
             
+            # Generate XML
             xml_content = generate_resolve_xml(st.session_state.laps, fps)
             
+            # Download button
             st.download_button(
                 label="⬇️ Download XML Timeline",
                 data=xml_content,
@@ -621,74 +514,51 @@ with tab5:
                 use_container_width=True,
                 type="primary"
             )
-        else:
-            st.info("Create sections in Tab 2 to export timeline")
-    
-    # Audio Export
-    with export_col2:
-        st.subheader("🎧 Audio Files")
         
-        if st.session_state.generated_audio:
-            for i, audio_item in enumerate(st.session_state.generated_audio):
+        # Export all audio files as zip
+        if st.session_state.audio_files:
+            st.divider()
+            st.subheader("📦 Batch Export")
+            
+            import zipfile
+            from io import BytesIO
+            
+            if st.button("📦 Download All Audio Files (ZIP)", use_container_width=True):
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for idx, audio_data in st.session_state.audio_files.items():
+                        filename = f"section_{idx+1}_{st.session_state.laps[idx]['title'].replace(' ', '_')}.mp3"
+                        zip_file.writestr(filename, audio_data)
+                
+                zip_buffer.seek(0)
                 st.download_button(
-                    label=f"⬇️ Section {audio_item['section']}: {audio_item['title']}",
-                    data=audio_item['audio'],
-                    file_name=f"section_{audio_item['section']}_{audio_item['title'].replace(' ', '_')}.mp3",
-                    mime="audio/mp3",
-                    use_container_width=True,
-                    key=f"audio_download_{i}"
+                    label="⬇️ Download ZIP",
+                    data=zip_buffer,
+                    file_name="audio_tour_all_sections.zip",
+                    mime="application/zip",
+                    use_container_width=True
                 )
-        else:
-            st.info("Generate audio in Tab 4 to download")
-    
-    st.divider()
-    
-    # Sound Effects Export
-    if st.session_state.sfx_requests:
-        st.subheader("🔔 Sound Effects")
         
-        sfx_col1, sfx_col2 = st.columns(2)
-        for i, sfx_item in enumerate(st.session_state.sfx_requests):
-            col = sfx_col1 if i % 2 == 0 else sfx_col2
-            with col:
-                st.download_button(
-                    label=f"⬇️ {sfx_item['name']}",
-                    data=sfx_item['audio'],
-                    file_name=f"sfx_{sfx_item['name'].replace(' ', '_')}.mp3",
-                    mime="audio/mp3",
-                    use_container_width=True,
-                    key=f"sfx_download_{i}"
-                )
-    
-    st.divider()
-    
-    # Suno Music Request
-    if st.session_state.music_request:
-        st.subheader("🎵 Suno AI Music Generation")
-        
-        st.text_area(
-            "Copy this request and use it on Suno AI:",
-            value=st.session_state.music_request,
-            height=300
-        )
-        
-        st.markdown("[🎵 Open Suno AI](https://suno.ai)")
-    
-    st.divider()
-    
-    # Complete Script Export
-    if st.session_state.script:
-        st.subheader("📄 Complete Script")
-        
-        script_json = json.dumps(st.session_state.script, indent=2)
-        
-        st.download_button(
-            label="⬇️ Download Complete Script (JSON)",
-            data=script_json,
-            file_name="audio_tour_script.json",
-            mime="application/json",
-            use_container_width=True
-        )
+        # Preview
+        with st.expander("📄 Preview Timeline Summary"):
+            st.markdown("### Timeline Overview")
+            for i, lap in enumerate(st.session_state.laps):
+                status_icons = []
+                if i in st.session_state.scripts:
+                    status_icons.append("📝")
+                if i in st.session_state.audio_files:
+                    status_icons.append("🎤")
+                
+                status = " ".join(status_icons) if status_icons else "⏱️"
+                
+                st.markdown(f"""
+                **{i+1}. {lap['title']}** {status}
+                - Start: `{format_time(lap['start_time'])}` (Frame: {timecode_to_frames(lap['start_time'], fps)})
+                - End: `{format_time(lap['end_time'])}` (Frame: {timecode_to_frames(lap['end_time'], fps)})
+                - Duration: `{format_time(lap['duration'])}`
+                """)
+    else:
+        st.info("Record some sections to enable export options.")
 
 # Auto-refresh for running timer
 if st.session_state.running:

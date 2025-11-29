@@ -8,13 +8,6 @@ import os
 from pathlib import Path
 import json
 
-# Audio recording and processing
-try:
-    from st_audiorec import st_audiorec
-    AUDIO_RECORDER_AVAILABLE = True
-except ImportError:
-    AUDIO_RECORDER_AVAILABLE = False
-    
 import openai
 from anthropic import Anthropic
 from elevenlabs import ElevenLabs, VoiceSettings
@@ -327,28 +320,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 # TAB 1: Recording and Transcription
 with tab1:
-    st.header("🎤 Record Your Brainstorming")
+    st.header("🎤 Upload Audio for Brainstorming")
     
-    st.info("Record yourself describing the audio tour content, locations, and key points you want to cover.")
+    st.info("Upload an audio file of yourself describing the audio tour content, locations, and key points.")
     
-    audio_bytes = None
-    
-    # Try to use audio recorder if available
-    if AUDIO_RECORDER_AVAILABLE:
-        st.subheader("Record Audio")
-        wav_audio_data = st_audiorec()
-        
-        if wav_audio_data is not None:
-            # Display audio player
-            st.audio(wav_audio_data, format='audio/wav')
-            audio_bytes = wav_audio_data
-            st.session_state.audio_data = audio_bytes
-    else:
-        st.warning("⚠️ Live audio recording not available. Please upload an audio file instead.")
-    
-    # Always provide file upload option
-    st.markdown("---")
-    st.subheader("Or Upload Audio File")
     uploaded_file = st.file_uploader(
         "Upload audio file (WAV, MP3, M4A)",
         type=['wav', 'mp3', 'm4a', 'ogg'],
@@ -357,18 +332,15 @@ with tab1:
     
     if uploaded_file is not None:
         st.audio(uploaded_file)
-        audio_bytes = uploaded_file.read()
+        audio_bytes = uploaded_file.getvalue()
         st.session_state.audio_data = audio_bytes
-    
-    # Transcription button
-    if audio_bytes or st.session_state.audio_data:
+        
         if st.button("📝 Transcribe Audio", type="primary"):
             if not openai_key:
                 st.error("Please enter your OpenAI API Key in the sidebar")
             else:
                 with st.spinner("Transcribing audio..."):
-                    audio_to_transcribe = audio_bytes if audio_bytes else st.session_state.audio_data
-                    transcription = transcribe_audio(audio_to_transcribe, openai_key)
+                    transcription = transcribe_audio(audio_bytes, openai_key)
                     if transcription:
                         st.session_state.transcription = transcription
                         st.success("Transcription complete!")
